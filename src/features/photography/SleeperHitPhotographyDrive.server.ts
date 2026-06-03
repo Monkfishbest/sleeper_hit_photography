@@ -1,143 +1,77 @@
-import { google } from 'googleapis'
 import { unstable_cache } from 'next/cache'
 import { type GalleryPhoto, type GallerySection, getGallerySection, type GallerySectionId } from './SleeperHitPhotographyData'
-
-type DriveFile = {
-  createdTime?: string | null
-  description?: string | null
-  id?: string | null
-  imageMediaMetadata?: {
-    height?: number | null
-    width?: number | null
-  } | null
-  mimeType?: string | null
-  name?: string | null
-}
 
 export type LoadedGallerySection = {
   photos: GalleryPhoto[]
   section: GallerySection
-  source: 'drive' | 'fallback'
+  source: 'cloudfront' | 'fallback'
 }
 
-const driveTimeoutMs = 10000
-const drivePhotoListCacheSeconds = 300
+const cloudfrontDomain = process.env.CLOUDFRONT_DOMAIN || ''
+const manifestCacheSeconds = 300
 
-function getDriveErrorMessage(error: unknown) {
-  if (error instanceof Error) {
-    return error.message
+function getCloudfrontUrl(s3Key: string): string {
+  if (!cloudfrontDomain) {
+    return ''
   }
-
-  return 'Unknown Google Drive error'
+  return `https://${cloudfrontDomain}/${s3Key}`
 }
 
-const sectionDriveFolderIds: Record<GallerySection['id'], string> = {
-  events: '1m13viGXlQ488nZT1NXD0_jJBIZo_rMf5',
-  landscapes: '1PF4r98RDKcQu8hwZYr7-XiMc3bEKJTMs',
-  portraits: '162NlwBD3DKcvstEyfqoKTfqUFXY3QJ5f',
-  street: '18UpLqTaCGD9BQbYX8cqZeU1aTFqJ_JyE',
-}
-
-function getDriveCredentials() {
-  const clientEmail =
-    process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL ?? process.env.GOOGLE_DRIVE_CLIENT_EMAIL
-  const privateKey =
-    process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n') ??
-    process.env.GOOGLE_DRIVE_PRIVATE_KEY?.replace(/\\n/g, '\n')
-
-  if (!clientEmail || !privateKey) {
+async function fetchManifestUncached(sectionId: GallerySectionId): Promise<GalleryPhoto[] | null> {
+  if (!cloudfrontDomain) {
+    console.warn('CLOUDFRONT_DOMAIN not configured')
     return null
   }
 
-  return { clientEmail, privateKey }
-}
+  const manifestUrl = getCloudfrontUrl(`${sectionId}/manifest.json`)
 
-function getDriveFolderId(section: GallerySection) {
-  return (
-    process.env[section.folderEnvVar] ??
-    sectionDriveFolderIds[section.id] ??
-    process.env.GOOGLE_DRIVE_FOLDER_ID
-  )
-}
+  try {
+    const response = await fetch(manifestUrl, {
+      // Don't cache the fetch itself, let CloudFront handle it
+      next: { revalidate: manifestCacheSeconds },
+    })
 
-async function getDriveClient() {
-  const credentials = getDriveCredentials()
+    if (!response.ok) {
+      console.warn(`Manifest not found for ${sectionId}: ${response.status}`)
+      return null
+    }
 
-  if (!credentials) {
+    const manifestData = await response.json() as Array<{
+      alt: string
+      caption: string
+      description?: string
+      height: number
+      width: number
+      id: string
+      s3Key: string
+    }>
+
+    // Transform manifest data to GalleryPhoto format with CloudFront URLs
+    const photos: GalleryPhoto[] = manifestData.map((item) => ({
+      alt: item.alt,
+      caption: item.caption,
+      description: item.description || 'No description available.',
+      height: item.height,
+      width: item.width,
+      id: item.id,
+      src: getCloudfrontUrl(item.s3Key),
+    }))
+
+    return photos
+  } catch (error) {
+    console.warn(
+      `[Sleeper Hit Photography] Manifest fetch failed for ${sectionId}:`,
+      error instanceof Error ? error.message : String(error),
+    )
     return null
   }
-
-  const auth = new google.auth.GoogleAuth({
-    credentials: {
-      client_email: credentials.clientEmail,
-      private_key: credentials.privateKey,
-    },
-    scopes: ['https://www.googleapis.com/auth/drive.readonly'],
-  })
-
-  return google.drive({ version: 'v3', auth })
 }
 
-function toDrivePhoto(file: DriveFile): GalleryPhoto | null {
-  if (!file.id || !file.name || !file.mimeType?.startsWith('image/')) {
-    return null
-  }
-
-  const encodedMimeType = encodeURIComponent(file.mimeType)
-
-  return {
-    alt: file.name,
-    caption: file.name.replace(/\.[^.]+$/, ''),
-    description:
-      file.description?.trim() ||
-      'No abstract yet. You can add one later through the file description metadata if you want richer panel text.',
-    height: file.imageMediaMetadata?.height ?? 1200,
-    id: file.id,
-    src: `/api/drive/photo/${file.id}?mimeType=${encodedMimeType}`,
-    width: file.imageMediaMetadata?.width ?? 1600,
-  }
-}
-
-async function listDrivePhotosUncached(sectionId: GallerySectionId): Promise<GalleryPhoto[] | null> {
-  const section = getGallerySection(sectionId)
-  const folderId = getDriveFolderId(section)
-
-  if (!folderId) {
-    return null
-  }
-
-  const drive = await getDriveClient()
-
-  if (!drive) {
-    return null
-  }
-
-  const response = await drive.files.list(
-    {
-      fields: 'files(id,name,mimeType,description,createdTime,imageMediaMetadata(width,height))',
-      includeItemsFromAllDrives: true,
-      orderBy: 'createdTime desc',
-      q: `'${folderId}' in parents and trashed = false and mimeType contains 'image/'`,
-      supportsAllDrives: true,
-    },
-    {
-      timeout: driveTimeoutMs,
-    },
-  )
-
-  const photos =
-    response.data.files
-      ?.map((file) => toDrivePhoto(file as DriveFile))
-      .filter((photo): photo is GalleryPhoto => photo !== null) ?? []
-
-  return photos.length > 0 ? photos : null
-}
-
-const listDrivePhotos = unstable_cache(
-  listDrivePhotosUncached,
-  ['sleeper-hit-photography-drive-photos'],
+const fetchManifest = unstable_cache(
+  fetchManifestUncached,
+  ['sleeper-hit-photography-manifest'],
   {
-    revalidate: drivePhotoListCacheSeconds,
+    revalidate: manifestCacheSeconds,
   },
 )
 
@@ -145,18 +79,18 @@ export async function loadGallerySection(sectionId: GallerySectionId): Promise<L
   const section = getGallerySection(sectionId)
 
   try {
-    const drivePhotos = await listDrivePhotos(sectionId)
+    const cloudfrontPhotos = await fetchManifest(sectionId)
 
-    if (drivePhotos) {
+    if (cloudfrontPhotos && cloudfrontPhotos.length > 0) {
       return {
-        photos: drivePhotos,
+        photos: cloudfrontPhotos,
         section,
-        source: 'drive',
+        source: 'cloudfront',
       }
     }
   } catch (error) {
     console.warn(
-      `[Sleeper Hit Photography] Google Drive failed for ${section.id}: ${getDriveErrorMessage(error)}`,
+      `[Sleeper Hit Photography] CloudFront fetch failed for ${section.id}`,
     )
   }
 

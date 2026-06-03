@@ -1,0 +1,10 @@
+{
+  "name": "sleeper-hit-drive-sync",
+  "version": "1.0.0",
+  "description": "Lambda function to sync Google Drive photos to S3",
+  "type": "module",
+  "dependencies": {
+    "googleapis": "^171.4.0",
+    "@aws-sdk/client-s3": "^3.300.0"
+  }
+}

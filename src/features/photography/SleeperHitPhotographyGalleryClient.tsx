@@ -12,7 +12,7 @@ export function SleeperHitPhotographyGalleryClient({
 }: Readonly<{
   photos: GalleryPhoto[]
   section: GallerySection
-  source: 'drive' | 'fallback'
+  source: 'cloudfront' | 'fallback'
 }>) {
   const [loadingImages, setLoadingImages] = useState<Set<string>>(new Set(photos.map((p) => p.id)))
   const [lightboxOpen, setLightboxOpen] = useState(false)

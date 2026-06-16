@@ -7,7 +7,12 @@ export type LoadedGallerySection = {
   source: 'cloudfront' | 'fallback'
 }
 
-const cloudfrontDomain = process.env.CLOUDFRONT_DOMAIN || ''
+function normalizeCloudfrontDomain(domain: string | undefined): string {
+  return (domain || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '')
+}
+
+const rawCloudfrontDomain = process.env.CLOUDFRONT_DOMAIN
+const cloudfrontDomain = normalizeCloudfrontDomain(rawCloudfrontDomain)
 const manifestCacheSeconds = 300
 
 function getCloudfrontUrl(s3Key: string): string {
@@ -19,7 +24,7 @@ function getCloudfrontUrl(s3Key: string): string {
 
 async function fetchManifestUncached(sectionId: GallerySectionId): Promise<GalleryPhoto[] | null> {
   if (!cloudfrontDomain) {
-    console.warn('CLOUDFRONT_DOMAIN not configured')
+    console.warn('[Sleeper Hit Photography] CLOUDFRONT_DOMAIN not configured')
     return null
   }
 
@@ -32,7 +37,9 @@ async function fetchManifestUncached(sectionId: GallerySectionId): Promise<Galle
     })
 
     if (!response.ok) {
-      console.warn(`Manifest not found for ${sectionId}: ${response.status}`)
+      console.warn(
+        `[Sleeper Hit Photography] Manifest request failed for ${sectionId}: ${response.status} ${manifestUrl}`,
+      )
       return null
     }
 
@@ -60,7 +67,7 @@ async function fetchManifestUncached(sectionId: GallerySectionId): Promise<Galle
     return photos
   } catch (error) {
     console.warn(
-      `[Sleeper Hit Photography] Manifest fetch failed for ${sectionId}:`,
+      `[Sleeper Hit Photography] Manifest fetch failed for ${sectionId}: ${manifestUrl} (configured domain: ${rawCloudfrontDomain || 'missing'})`,
       error instanceof Error ? error.message : String(error),
     )
     return null
